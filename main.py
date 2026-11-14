@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
-"""ai-happy-01 entry: deliver art.png as /output/entry.png.
+"""Entry program for make.fun competition ai-happy-01 (v2 rebuild).
 
-The artwork shows a golden retriever puppy in a daisy crown leaping
-to pop a giant soap bubble with its nose, in a flower meadow at
-golden hour. It is stored beside this file as art.png. This program
-checks the image against the competition gate -- PNG or JPEG, at
-most 1 MiB, at most 1024 x 1024 pixels, complete file -- and then
-copies it byte-for-byte to the output location. Standard library
-only, deterministic, no network, runs in well under a second.
+The picture: a golden retriever puppy wearing a crown of daisies,
+caught mid-leap in a flower meadow at golden hour as its nose pops
+a giant soap bubble. Pastel balloons drift on the left and a double
+rainbow arcs over the hills on the right. The artwork lives next to
+this file as art.png.
+
+What this program does is deliberately small: it reads art.png,
+checks it against the competition limits (PNG or JPEG, no more
+than 1 MiB, no more than 1024 x 1024 pixels, and a complete file),
+then writes the exact same bytes to the entry output. It uses only
+the Python standard library, touches no network, and always
+produces the same output for the same art.png.
 """
 
 import hashlib
@@ -16,89 +21,98 @@ import struct
 import sys
 from pathlib import Path
 
-MAX_BYTES = 1_048_576  # 1 MiB gate limit
-MAX_WIDTH = 1024
-MAX_HEIGHT = 1024
-PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
-JPEG_SIGNATURE = b"\xff\xd8\xff"
+BYTE_LIMIT = 1048576
+WIDTH_LIMIT = 1024
+HEIGHT_LIMIT = 1024
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+JPEG_MAGIC = b"\xff\xd8\xff"
 
 
-def png_dimensions(data):
-    """Return (width, height) read from the PNG IHDR chunk."""
-    if len(data) < 24 or not data.startswith(PNG_SIGNATURE):
-        raise ValueError("not a PNG file")
-    if data[12:16] != b"IHDR":
-        raise ValueError("PNG is missing its IHDR chunk")
-    width, height = struct.unpack(">II", data[16:24])
-    if b"IEND" not in data[-64:]:
-        raise ValueError("PNG is truncated: no IEND chunk near the end")
-    return width, height
+def size_of_png(blob):
+    """Width and height of a PNG, from its IHDR chunk."""
+    if len(blob) < 24:
+        raise ValueError("PNG data is too short for a header")
+    if blob[12:16] != b"IHDR":
+        raise ValueError("PNG header chunk is not IHDR")
+    if b"IEND" not in blob[-64:]:
+        raise ValueError("PNG data ends before an IEND chunk")
+    return struct.unpack(">II", blob[16:24])
 
 
-def jpeg_dimensions(data):
-    """Return (width, height) by scanning JPEG segments for a SOF."""
-    if not data.startswith(JPEG_SIGNATURE):
-        raise ValueError("not a JPEG file")
-    if not data.rstrip().endswith(b"\xff\xd9"):
-        raise ValueError("JPEG is truncated: no EOI marker at the end")
-    pos = 2
-    while pos + 4 <= len(data):
-        if data[pos] != 0xFF:
-            raise ValueError("corrupt JPEG segment marker")
-        marker = data[pos + 1]
-        length = struct.unpack(">H", data[pos + 2 : pos + 4])[0]
+def size_of_jpeg(blob):
+    """Width and height of a JPEG, from its first SOF segment."""
+    if not blob.rstrip().endswith(b"\xff\xd9"):
+        raise ValueError("JPEG data has no end-of-image marker")
+    cursor = 2
+    while cursor + 4 <= len(blob):
+        if blob[cursor] != 0xFF:
+            raise ValueError("JPEG segment does not start with 0xFF")
+        marker = blob[cursor + 1]
+        seg_len = struct.unpack(">H", blob[cursor + 2 : cursor + 4])[0]
+        if seg_len < 2:
+            raise ValueError("JPEG segment length is invalid")
         if marker in (0xC0, 0xC1, 0xC2):
-            height, width = struct.unpack(">HH", data[pos + 5 : pos + 9])
+            height, width = struct.unpack(
+                ">HH", blob[cursor + 5 : cursor + 9]
+            )
             return width, height
-        if length < 2:
-            raise ValueError("corrupt JPEG segment length")
-        pos += 2 + length
-    raise ValueError("JPEG has no SOF marker: dimensions unknown")
+        cursor += 2 + seg_len
+    raise ValueError("JPEG data has no start-of-frame segment")
 
 
-def validate_image(data):
-    """Check the gate rules and return (kind, width, height)."""
-    if len(data) == 0:
-        raise ValueError("image file is empty")
-    if len(data) > MAX_BYTES:
-        raise ValueError(f"image is {len(data)} bytes, over the 1 MiB limit")
-    if data.startswith(PNG_SIGNATURE):
-        kind = "PNG"
-        width, height = png_dimensions(data)
-    elif data.startswith(JPEG_SIGNATURE):
-        kind = "JPEG"
-        width, height = jpeg_dimensions(data)
+def check_picture(blob):
+    """Enforce the gate limits; return (format, width, height)."""
+    if not blob:
+        raise ValueError("art.png is empty")
+    if len(blob) > BYTE_LIMIT:
+        raise ValueError("art.png is larger than 1 MiB")
+    if blob.startswith(PNG_MAGIC):
+        fmt = "PNG"
+        width, height = size_of_png(blob)
+    elif blob.startswith(JPEG_MAGIC):
+        fmt = "JPEG"
+        width, height = size_of_jpeg(blob)
     else:
-        raise ValueError("image is neither PNG nor JPEG (bad magic bytes)")
-    if width == 0 or height == 0:
-        raise ValueError("image has a zero dimension")
-    if width > MAX_WIDTH or height > MAX_HEIGHT:
-        raise ValueError(
-            f"image is {width}x{height}, over the {MAX_WIDTH}x{MAX_HEIGHT} limit"
-        )
-    return kind, width, height
+        raise ValueError("art.png is neither a PNG nor a JPEG")
+    if width < 1 or height < 1:
+        raise ValueError("art.png has a zero width or height")
+    if width > WIDTH_LIMIT or height > HEIGHT_LIMIT:
+        raise ValueError("art.png is larger than 1024 x 1024")
+    return fmt, width, height
 
 
-def main():
-    here = Path(__file__).resolve().parent
-    source = here / "art.png"
-    if not source.is_file():
-        raise ValueError("art.png is missing beside main.py")
-    data = source.read_bytes()
-    kind, width, height = validate_image(data)
-    out_dir = Path(os.environ.get("MAKEFUN_OUTPUT_DIR") or "/output")
-    out_dir.mkdir(parents=True, exist_ok=True)
-    target = out_dir / "entry.png"
-    tmp = out_dir / "entry.png.tmp"
-    tmp.write_bytes(data)
-    os.replace(tmp, target)
-    written = target.read_bytes()
-    if written != data:
-        raise ValueError("output does not match art.png byte-for-byte")
-    print(f"wrote {target} ({kind} {width}x{height}, {len(data)} bytes)")
-    print(f"sha256 {hashlib.sha256(written).hexdigest()}")
+def deliver(blob):
+    """Write blob to the output entry file, atomically.
+
+    The bytes land on a staging file first and are then renamed over
+    the target, so a reader never sees a half-written entry.png.
+    """
+    folder = Path(os.environ.get("MAKEFUN_OUTPUT_DIR") or "/output")
+    folder.mkdir(parents=True, exist_ok=True)
+    target = folder / "entry.png"
+    staging = folder / "entry.png.part"
+    staging.write_bytes(blob)
+    os.replace(staging, target)
+    return target
+
+
+def run():
+    folder = Path(__file__).resolve().parent
+    art_file = folder / "art.png"
+    if not art_file.is_file():
+        raise ValueError("art.png was not found beside main.py")
+    blob = art_file.read_bytes()
+    fmt, width, height = check_picture(blob)
+    target = deliver(blob)
+    echoed = target.read_bytes()
+    if echoed != blob:
+        raise ValueError("entry.png differs from art.png")
+    digest = hashlib.sha256(echoed).hexdigest()
+    print(f"entry written: {target}")
+    print(f"format {fmt}, size {width}x{height}, bytes {len(blob)}")
+    print(f"sha256 {digest}")
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(run())
